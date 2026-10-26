@@ -1,0 +1,139 @@
+name: 地下城堡3 每日舆情日报
+
+# 触发方式（2026-10-26 建立，与地下城堡4 同一架构）
+#   主通道：外部服务器（Windows 任务计划）每天 10:00 通过 API dispatch 触发 —— 准点
+#   兜底：  schedule 仅作保险。GitHub 对低活跃仓库的定时任务会延迟数小时，
+#           因此加了「今日已成功则跳过」守卫，避免兜底触发造成重复推送。
+# 报告页：https://linyy663.github.io/dc3-monitor/daily/
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      no_push:
+        description: '仅生成页面，跳过飞书推送'
+        type: boolean
+        default: false
+      force:
+        description: '忽略「今日已推送」检查，强制执行'
+        type: boolean
+        default: false
+
+concurrency:
+  group: dc3-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 防重复检查（今日是否已成功推送）
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "force=true，跳过防重复检查"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TODAY=$(TZ=Asia/Shanghai date +%F)
+          LAST=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/daily.yml/runs?status=success&per_page=20" \
+                 --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .run_started_at" 2>/dev/null | head -1 || true)
+
+          if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then
+            echo "无历史成功记录，继续执行"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LAST_DAY=$(TZ=Asia/Shanghai date -d "$LAST" +%F)
+          echo "今天(北京)=$TODAY / 上次成功=$LAST (北京日期 $LAST_DAY)"
+
+          if [ "$LAST_DAY" = "$TODAY" ]; then
+            echo "::notice::今日已成功推送过，跳过本次重复执行"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 设置 Python
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 安装依赖
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 生成日报（不推送）
+        if: steps.guard.outputs.skip != 'true'
+        run: python dc3_report.py --no-push
+
+      - name: 校验抓取结果
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          python - <<'PY'
+          import glob, json, os, sys
+          files = sorted(glob.glob("data/dc3/dc3_daily_*.json"), key=os.path.getmtime)
+          if not files:
+              print("::error::未生成任何数据文件，抓取失败")
+              sys.exit(1)
+          items = json.load(open(files[-1], encoding="utf-8"))
+          src = {}
+          for it in items:
+              src[it.get("source", "?")] = src.get(it.get("source", "?"), 0) + 1
+          print(f"数据文件: {files[-1]}  共 {len(items)} 条  {src}")
+          if len(items) == 0:
+              print("::error::抓取结果为空（可能被反爬拦截），终止本次运行")
+              sys.exit(1)
+          if not any(k.startswith("tieba") for k in src):
+              print("::warning::贴吧数据为 0，可能被拦截，仅 TapTap 数据可用")
+          PY
+
+      - name: 部署到 GitHub Pages
+        if: steps.guard.outputs.skip != 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./data/dc3/html_report_daily
+          destination_dir: daily
+          keep_files: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+
+      - name: 等待页面可访问
+        if: steps.guard.outputs.skip != 'true'
+        continue-on-error: true
+        run: |
+          URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/dc3-monitor/daily/"
+          for i in $(seq 1 12); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 20 "$URL")
+            echo "第${i}次探测: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "::warning::页面暂未返回 200，可能是 Pages 首次发布或 CDN 缓存延迟"
+          exit 0
+
+      - name: 推送飞书
+        if: steps.guard.outputs.skip != 'true' && inputs.no_push != true
+        run: |
+          python dc3_report.py --push-only --report-url "https://${GITHUB_REPOSITORY_OWNER}.github.io/dc3-monitor/daily/"

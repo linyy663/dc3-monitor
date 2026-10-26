@@ -1,0 +1,6 @@
+data/
+public/
+__pycache__/
+*.pyc
+github_token.txt
+.env
