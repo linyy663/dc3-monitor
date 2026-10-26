@@ -88,24 +88,7 @@ jobs:
 
       - name: 校验抓取结果
         if: steps.guard.outputs.skip != 'true'
-        run: |
-          python - <<'PY'
-          import glob, json, os, sys
-          files = sorted(glob.glob("data/dc3/dc3_daily_*.json"), key=os.path.getmtime)
-          if not files:
-              print("::error::未生成任何数据文件，抓取失败")
-              sys.exit(1)
-          items = json.load(open(files[-1], encoding="utf-8"))
-          src = {}
-          for it in items:
-              src[it.get("source", "?")] = src.get(it.get("source", "?"), 0) + 1
-          print(f"数据文件: {files[-1]}  共 {len(items)} 条  {src}")
-          if len(items) == 0:
-              print("::error::抓取结果为空（可能被反爬拦截），终止本次运行")
-              sys.exit(1)
-          if not any(k.startswith("tieba") for k in src):
-              print("::warning::贴吧数据为 0，可能被拦截，仅 TapTap 数据可用")
-          PY
+        run: python scripts/check_data.py daily
 
       - name: 部署到 GitHub Pages
         if: steps.guard.outputs.skip != 'true'
