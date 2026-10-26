@@ -50,24 +50,32 @@ jobs:
           fi
 
           TODAY=$(TZ=Asia/Shanghai date +%F)
-          LAST=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/daily.yml/runs?status=success&per_page=20" \
-                 --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .run_started_at" 2>/dev/null | head -1 || true)
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/daily.yml/runs?per_page=15" \
+            --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID} and .conclusion == \"success\") | \"\(.id) \(.run_started_at)\"" \
+            > /tmp/runs.txt 2>/dev/null || true
 
-          if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then
-            echo "无历史成功记录，继续执行"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          echo "今天(北京)=$TODAY"
+          while read -r RUN_ID STARTED; do
+            [ -z "$RUN_ID" ] && continue
+            DAY=$(TZ=Asia/Shanghai date -d "$STARTED" +%F)
+            [ "$DAY" = "$TODAY" ] || continue
 
-          LAST_DAY=$(TZ=Asia/Shanghai date -d "$LAST" +%F)
-          echo "今天(北京)=$TODAY / 上次成功=$LAST (北京日期 $LAST_DAY)"
+            # 只认「推送飞书」步骤真正成功过的运行；no_push 测试运行不算
+            PUSHED=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs" \
+                     --jq '[.jobs[].steps[]? | select(.name == "推送飞书") | .conclusion] | join(",")' 2>/dev/null || true)
+            echo "  今日运行 $RUN_ID (北京 $DAY) 推送步骤: ${PUSHED:-无}"
 
-          if [ "$LAST_DAY" = "$TODAY" ]; then
-            echo "::notice::今日已成功推送过，跳过本次重复执行"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+            case "$PUSHED" in
+              *success*)
+                echo "::notice::今日已有成功推送的运行 ${RUN_ID}，跳过本次"
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          done < /tmp/runs.txt
+
+          echo "今日尚无成功推送，继续执行"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: 设置 Python
         if: steps.guard.outputs.skip != 'true'
