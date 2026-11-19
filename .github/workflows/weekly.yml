@@ -125,7 +125,10 @@ jobs:
           echo "::warning::页面暂未返回 200，可能是 Pages 首次发布或 CDN 缓存延迟"
           exit 0
 
+      # 2026-11-19 停用飞书群推送（周报页面仍每周生成并部署到 GitHub Pages）
+      # 如需恢复推送，把下面的 if: false 改回：
+      #   if: steps.guard.outputs.skip != 'true' && inputs.no_push != true
       - name: 推送飞书
-        if: steps.guard.outputs.skip != 'true' && inputs.no_push != true
+        if: false
         run: |
           python dc3_report.py --weekly --push-only --report-url "https://${GITHUB_REPOSITORY_OWNER}.github.io/dc3-monitor/weekly/"
